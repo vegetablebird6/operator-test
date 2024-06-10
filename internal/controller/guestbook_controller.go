@@ -18,7 +18,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"time"
 
+	"github.com/robfig/cron/v3"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,6 +34,7 @@ import (
 type GuestbookReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	C      *cron.Cron
 }
 
 // +kubebuilder:rbac:groups=webapp.my.domain,resources=guestbooks,verbs=get;list;watch;create;update;patch;delete
@@ -47,10 +51,27 @@ type GuestbookReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.18.2/pkg/reconcile
 func (r *GuestbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
+	log := log.FromContext(ctx)
 
 	// TODO(user): your logic here
-
+	var g webappv1.Guestbook
+	if err := r.Client.Get(ctx, req.NamespacedName, &g); err != nil {
+		log.Error(err, "unable to fetch guestbook")
+		// we'll ignore not-found errors, since they can't be fixed by an immediate
+		// requeue (we'll need to wait for a new notification), and we can get them
+		// on deleted requests.
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	log.Info(fmt.Sprintf("Guestbook Namespace is %s, name is %s", req.Namespace, req.Name))
+	task := Task{
+		param: fmt.Sprintf("Guestbook %s status is %v", g.Name, g.Status.Result),
+	}
+	r.C.AddJob(g.Spec.CronExpr, &task)
+	log.Info("添加任务成功")
+	// 启动cron调度器
+	r.C.Start()
+	g.Status.Result = true
+	r.Client.Status().Update(ctx, &g)
 	return ctrl.Result{}, nil
 }
 
@@ -59,4 +80,14 @@ func (r *GuestbookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&webappv1.Guestbook{}).
 		Complete(r)
+}
+
+// 定义任务结构
+type Task struct {
+	param string
+}
+
+// 实现任务方法
+func (t *Task) Run() {
+	fmt.Println("Task executed at:", time.Now(), "with parameter:", t.param)
 }
